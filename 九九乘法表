@@ -1,0 +1,14 @@
+#!/bin/bash
+#
+declare -i cow=1
+declare -i col=1
+while [ $cow -le 9 ]; do
+    while [ $col -le $cow ]; do
+        let res=$cow*$col
+        echo -ne "$cow*$col=$res\t"
+        let col++
+    done
+let col=1
+let cow++
+echo -e "\n"
+done
