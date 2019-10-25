@@ -1,0 +1,136 @@
+@echo off
+setlocal EnableDelayedExpansion
+
+echo 1.关闭防火墙
+netsh advfirewall firewall add rule name="Remote Desktop" protocol=TCP dir=in localport=455 action=allow
+netsh advfirewall firewall add rule name="Remote Desktop-HP" protocol=TCP dir=in localport=465 action=allow
+netsh advfirewall set allprofiles state off
+
+echo 2.设置Windows 密码永不过期
+wmic useraccount where name="administrator" set passwordexpires="false"
+
+echo 3.设置Windows主机名pcname为EM-序列号sn
+for /f %%i in ('wmic bios get serialnumber ^| findstr /v /i ^ser ^| findstr .') do (set sn=%%i)
+set pcname=EM-%sn%
+
+reg add "HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\ComputerName\ActiveComputerName" /v ComputerName /t reg_sz /d %pcname% /f 
+reg add "HKEY_LOCAL_MACHINE\System\CurrentControlSet\Control\ComputerName\ComputerName" /v ComputerName /t reg_sz /d %pcname% /f
+:: 此行不加Team无法管理，需重新添加本地服务器。
+reg add "HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\Tcpip\Parameters" /v "NV Hostname" /t reg_sz /d %pcname% /f 
+reg add "HKEY_LOCAL_MACHINE\System\CurrentControlSet\Services\Tcpip\Parameters" /v Hostname /t reg_sz /d %pcname% /f 
+
+echo 4.开启Windows RDP 端口HP45625 Dell 45685
+for /f %%i in ('wmic ComputerSystem get Manufacturer ^|find /v "Manu" ^| findstr .') do (set type=%%i)
+if "%type%"=="HP" (
+reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server"  /v fDenyTSConnections /t REG_DWORD /d 0 /f
+:: 开启远程桌面服务
+reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server\Wds\rdpwd\Tds\tcp" /v PortNumber /t REG_DWORD /d 0x0000b239 /f
+reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v PortNumber /t REG_DWORD /d 0x0000b239 /f
+) else if "%type%"=="Dell" (
+reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server"  /v fDenyTSConnections /t REG_DWORD /d 0 /f
+:: 开启远程桌面服务
+reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server\Wds\rdpwd\Tds\tcp" /v PortNumber /t REG_DWORD /d 0x0000b275 /f
+reg add "HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v PortNumber /t REG_DWORD /d 0x0000b275 /f
+)else (
+echo 您的服务器类型与指定的端口号不匹配
+)
+
+echo 5.设置Windows桌面图标
+:: 我的电脑
+reg add "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel" /v {20D04FE0-3AEA-1069-A2D8-08002B30309D} /t REG_DWORD /d 0 /f
+:: 控制面板
+reg add "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel" /v {5399E694-6CE5-4D6C-8FCE-1D8870FDCBA0} /t REG_DWORD /d 0 /f
+:: 网络
+reg add "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\HideDesktopIcons\NewStartPanel" /v {F02C1A0D-BE21-4350-88B0-7367FC96EF3C} /t REG_DWORD /d 0 /f
+
+echo 6.添加em2358用户
+net user test test /add
+net localgroup Administrators test /add
+
+echo 7.配置Team的模式为交换机独立，主备模式。
+echo 正在配置Team 请稍后...
+::适用于确定的仅两个Up的端口做成Team，其它情况需要修改。
+:: 筛选出Up的端口名称NIC
+set j=0
+for /f "tokens=4-10" %%a in ('netsh interface show interface ^|find "已连接"') do (
+set /a j+=1
+if !j!==1 (set NIC1=%%a %%b %%c %%d %%e %%f %%g)
+if !j!==2 (set NIC2=%%a %%b %%c %%d %%e %%f %%g)
+)
+
+:del_right_space
+if "%NIC1:~-1%"==" " set "NIC1=%NIC1:~0,-1%" & goto :del_right_space
+if "%NIC2:~-1%"==" " set "NIC2=%NIC2:~0,-1%" & goto :del_right_space
+
+powershell.exe New-NetLbfoTeam -Name HX-Team -TeamMember '%NIC1%','%NIC2%' -TeamingMode switchindependent -LoadBalancingAlgorithm Dynamic -Confirm:$false -ErrorAction SilentlyContinue 
+powershell.exe Set-NetLbfoTeamMember '%NIC1%' -administrativemode standby
+echo Team 配置完成...
+
+echo 8.配置IP地址
+set/p IP=请输入IP地址：
+for /f "tokens=1-3delims=." %%i in ('echo %IP%') do (set GW=%%i.%%j.%%k.1)
+netsh interface ip set address name="HX-Team" source=static addr=%IP% mask=255.255.255.0 %GW%
+
+
+echo 9.安装zabbix服务
+for /f "tokens=*" %%i in ('type C:\zabbix\zabbix_agentd.conf ^|findstr /v ^#') do (
+set line_text=%%i
+set line_text=!line_text:10.1.51.65=%IP%!
+echo !line_text! >> "C:\zabbix\zabbix_agentd.txt"
+)
+move /Y "C:\zabbix\zabbix_agentd.txt" "C:\zabbix\zabbix_agentd.conf"
+C:\zabbix\zabbix_agentd.exe -c C:\zabbix\zabbix_agentd.conf -i
+C:\zabbix\zabbix_agentd.exe -c C:\zabbix\zabbix_agentd.conf -s
+
+
+echo 10.配置WSUS客户端
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate /f
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate /v WUServer /t REG_SZ /d http://10.1.60.33:8530 /f
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate /v WUStatusServer /t REG_SZ /d http://10.1.60.33:8530 /f
+:: WSUS服务器地址，相当于在组策略里配置Intranet Microsoft 更新服务位置
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate /v TargetGroupEnabled /t REG_DWORD /d 1 /f
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate /v TargetGroup /t REG_SZ /d 2012系统 /f
+:: WSUS Client 开启组分配及指定组的名字,相当于在组策略里配置允许客户端目标配置
+
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate\AU /f
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate\AU /v  AUOptions /t REG_DWORD /d 3 /f
+:: 配置自动更新，2 =下载之前通知、3 =自动下载和通知安装、4 =自动下载并计划安装(须配合ScheduledInstallDay和ScheduledInstallTime)
+:: 5 =自动更新是必需的，但最终用户可以配置它，本地管理员可以配置。
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate\AU /v  DetectionFrequency /t REG_DWORD /d 22 /f
+:: 配置自动更新检测频率1-22Hour
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate\AU /v  DetectionFrequencyEnabled /t REG_DWORD /d 1 /f
+:: 启用自动更新检测频率
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate\AU /v  NoAutoRebootWithLoggedOnUsers /t REG_DWORD /d 1 /f
+:: 1 =自动更新将等待任何登录的用户重新启动计算机，而不是自动使计算机重新启动、0 =自动更新通知用户计算机将在 5 分钟内自动重新启动以完成安装。
+
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate\AU /v  NoAutoUpdate /t REG_DWORD /d 0 /f
+:: 0 =启用自动更新、1 =禁用自动更新。
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate\AU /v  AutoInstallMinorUpdates /t REG_DWORD /d 1 /f
+:: 自动安装次要更新，1 =静默安装次要更新、0 =跟其它更新一样处理次要更新
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate\AU /v  NoAUAsDefaultShutdownOption /t REG_DWORD /d 1 /f
+:: Windows不会覆盖开始菜单的关机选项，会单独保留只关机而不进行更新的操作
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate\AU /v  ScheduledInstallDay /t REG_DWORD /d 7 /f
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate\AU /v  ScheduledInstallTime /t REG_DWORD /d 6 /f
+:: 此参数只有当AUOptions的键值设置为4时才生效。日期范围= 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7，0 =每一天、1至7 =周日（1）至星期六（7）；时间为24小时制
+reg add HKEY_LOCAL_MACHINE\SOFTWARE\Policies\Microsoft\windows\WindowsUpdate\AU /v  UseWUServer /t REG_DWORD /d 1 /f
+:: 必须设置此项，才能使UseWUServer 的值生效。
+net stop wuauserv
+net start wuauserv
+wuauclt /detectnow
+
+echo 11.安装telnet客户端
+dism /Online /Enable-Feature /FeatureName:TelnetClient
+
+echo 12.运行Safe安全加固工具
+start /D "C:\Program Files\safe\" safe.exe
+
+echo 13.安装Symantec客户端
+start /D "C:\Program Files\Symantec\Symantec Endpoint Protection for 99.100" setup.exe
+echo 等待Symantec 安装完成
+
+echo 14.激活2012系统
+echo ::::::::::::::::::::::::::::::::::::::::::::::::
+echo :: 输入Windows 2012密钥，联网后将会自动激活 ::
+slmgr -ipk  3JWBR-BJFVH-2WEWC-B7GQY-JK748   
+
+exit
