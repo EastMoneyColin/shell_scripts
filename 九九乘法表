@@ -12,3 +12,17 @@ let col=1
 let cow++
 echo -e "\n"
 done
+
+#倒序打印乘法表
+declare -i cow=9
+declare -i col=1
+while [ $cow -ge 0 ]; do
+    while [ $col -le $cow ]; do
+        let res=$cow*$col
+        echo -ne "$cow*$col=$res\t"
+        let col++
+    done
+let col=1
+let cow--
+echo -e "\n"
+done
